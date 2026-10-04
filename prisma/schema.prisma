@@ -1,0 +1,396 @@
+generator client {
+  provider = "prisma-client"
+  output = "../src/generated/prisma"
+}
+datasource db {
+  provider = "postgresql"
+}
+enum Role {
+  CHILD
+  VOLUNTEER
+  ORGANIZATION_ADMIN
+  ORGANIZATION_MEMBER
+  MODERATOR
+  ADMIN
+  OWNER
+}
+enum ReportStatus {
+  PENDING_REVIEW
+  APPROVED
+  CLAIMED
+  AWAITING_VERIFICATION
+  CLEANED
+  REJECTED
+  DUPLICATE
+  REMOVED
+}
+model User {
+  id String @id @default(cuid())
+  email String @unique
+  passwordHash String
+  name String
+  username String @unique
+  role Role @default(VOLUNTEER)
+  verifiedAt DateTime?
+  banned Boolean @default(false)
+  sessionVersion Int @default(0)
+  createdAt DateTime @default(now())
+  profile Profile?
+  child ChildProfile?
+  reports TrashReport[] @relation("Reporter")
+  cleanups CleanupAttempt[]
+  transactions PointTransaction[]
+  achievements UserAchievement[]
+  redemptions RewardRedemption[]
+  memberships GroupMember[]
+  organizations OrganizationMember[]
+  notifications Notification[]
+  tokens AuthToken[]
+  saved SavedReport[]
+  confirmations Confirmation[]
+  rsvps EventParticipant[]
+  lessonResults LessonResult[]
+}
+model Profile {
+  userId String @id
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  bio String @default("")
+  emirate String @default("Dubai")
+  area String @default("")
+  interest String @default("BOTH")
+  avatarId String?
+  bannerId String?
+  language String @default("en")
+  theme String @default("system")
+  publicProfile Boolean @default(false)
+  leaderboard Boolean @default(false)
+  notifications Boolean @default(true)
+  onboardingComplete Boolean @default(false)
+  balance Int @default(0)
+  lifetimePoints Int @default(0)
+  currentStreak Int @default(0)
+  longestStreak Int @default(0)
+  lastActivityDay String?
+}
+model ChildProfile {
+  userId String @id
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  birthDate DateTime
+  guardianEmail String
+  approvedAt DateTime?
+}
+model AuthToken {
+  id String @id @default(cuid())
+  hash String @unique
+  userId String
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  purpose String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+model Upload {
+  id String @id @default(cuid())
+  ownerId String
+  hash String
+  mime String @default("image/webp")
+  bytes Bytes?
+  storageKey String?
+  width Int
+  height Int
+  createdAt DateTime @default(now())
+  @@index([ownerId])
+  @@index([hash])
+}
+model TrashReport {
+  id String @id @default(cuid())
+  reporterId String
+  reporter User @relation("Reporter",fields:[reporterId],references:[id])
+  title String
+  description String
+  category String
+  severity Int
+  latitude Float
+  longitude Float
+  address String
+  emirate String
+  photoId String
+  hazardous Boolean @default(false)
+  status ReportStatus @default(PENDING_REVIEW)
+  duplicateOf String?
+  placeId String?
+  place Place? @relation(fields:[placeId],references:[id])
+  riskSignals Json @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  cleanups CleanupAttempt[]
+  reviews AIReview[]
+  confirmations Confirmation[]
+  saved SavedReport[]
+  @@index([latitude,longitude,status])
+  @@index([reporterId,createdAt])
+  @@index([status,createdAt])
+}
+model CleanupAttempt {
+  id String @id @default(cuid())
+  reportId String
+  report TrashReport @relation(fields:[reportId],references:[id])
+  cleanerId String
+  cleaner User @relation(fields:[cleanerId],references:[id])
+  status String @default("CLAIMED")
+  afterPhotoId String?
+  notes String @default("")
+  claimedAt DateTime @default(now())
+  expiresAt DateTime
+  submittedAt DateTime?
+  verifiedAt DateTime?
+  @@index([reportId,status])
+  @@index([cleanerId,status])
+}
+model AIReview {
+  id String @id @default(cuid())
+  reportId String
+  report TrashReport @relation(fields:[reportId],references:[id])
+  cleanupId String?
+  provider String
+  decision String
+  confidence Float?
+  reason String
+  createdAt DateTime @default(now())
+}
+model PointTransaction {
+  id String @id @default(cuid())
+  userId String
+  user User @relation(fields:[userId],references:[id])
+  amount Int
+  type String
+  reference String @unique
+  reason String
+  createdAt DateTime @default(now())
+  @@index([userId,createdAt])
+}
+model Level {
+  id Int @id
+  name String
+  minimumPoints Int @unique
+}
+model Achievement {
+  id String @id @default(cuid())
+  name String
+  description String
+  icon String @default("leaf")
+  category String
+  requirementType String
+  requirementValue Int
+  bonus Int @default(0)
+  rarity String @default("COMMON")
+  hidden Boolean @default(false)
+  active Boolean @default(true)
+  users UserAchievement[]
+}
+model UserAchievement {
+  userId String
+  user User @relation(fields:[userId],references:[id])
+  achievementId String
+  achievement Achievement @relation(fields:[achievementId],references:[id])
+  unlockedAt DateTime @default(now())
+  @@id([userId,achievementId])
+}
+model Reward {
+  id String @id @default(cuid())
+  name String
+  description String
+  photoId String?
+  cost Int
+  quantity Int
+  provider String
+  category String @default("ECO_PRODUCT")
+  location String
+  emirate String
+  instructions String
+  terms String
+  startsAt DateTime @default(now())
+  expiresAt DateTime
+  perUserLimit Int @default(1)
+  featured Boolean @default(false)
+  active Boolean @default(true)
+  demo Boolean @default(false)
+  redemptions RewardRedemption[]
+}
+model RewardRedemption {
+  id String @id @default(cuid())
+  userId String
+  user User @relation(fields:[userId],references:[id])
+  rewardId String
+  reward Reward @relation(fields:[rewardId],references:[id])
+  code String @unique
+  requestKey String @unique
+  status String @default("ISSUED")
+  createdAt DateTime @default(now())
+  @@index([userId,rewardId])
+}
+model Group {
+  id String @id @default(cuid())
+  name String
+  description String
+  emirate String
+  purpose String
+  rules String
+  private Boolean @default(false)
+  suspended Boolean @default(false)
+  photoId String?
+  createdAt DateTime @default(now())
+  members GroupMember[]
+  posts GroupPost[]
+  events Event[]
+}
+model GroupMember {
+  groupId String
+  group Group @relation(fields:[groupId],references:[id],onDelete:Cascade)
+  userId String
+  user User @relation(fields:[userId],references:[id])
+  role String @default("MEMBER")
+  status String @default("ACTIVE")
+  joinedAt DateTime @default(now())
+  @@id([groupId,userId])
+}
+model GroupPost {
+  id String @id @default(cuid())
+  groupId String
+  group Group @relation(fields:[groupId],references:[id],onDelete:Cascade)
+  authorId String
+  content String
+  createdAt DateTime @default(now())
+}
+model Organization {
+  id String @id @default(cuid())
+  name String
+  type String
+  description String
+  website String @default("")
+  emirate String
+  status String @default("PENDING")
+  proofId String?
+  members OrganizationMember[]
+  places Place[]
+  events Event[]
+}
+model OrganizationMember {
+  organizationId String
+  organization Organization @relation(fields:[organizationId],references:[id])
+  userId String
+  user User @relation(fields:[userId],references:[id])
+  role String @default("STAFF")
+  @@id([organizationId,userId])
+}
+model Place {
+  id String @id @default(cuid())
+  organizationId String
+  organization Organization @relation(fields:[organizationId],references:[id])
+  name String
+  address String
+  latitude Float
+  longitude Float
+  radiusMeters Int @default(50)
+  status String @default("PENDING")
+  proofId String
+  reports TrashReport[]
+  @@index([latitude,longitude])
+}
+model Event {
+  id String @id @default(cuid())
+  title String
+  description String
+  location String
+  emirate String
+  startsAt DateTime
+  capacity Int
+  minimumAge Int @default(18)
+  safety String
+  bring String
+  groupId String?
+  group Group? @relation(fields:[groupId],references:[id])
+  organizationId String?
+  organization Organization? @relation(fields:[organizationId],references:[id])
+  creatorId String
+  reportIds Json @default("[]")
+  participants EventParticipant[]
+}
+model EventParticipant {
+  eventId String
+  event Event @relation(fields:[eventId],references:[id])
+  userId String
+  user User @relation(fields:[userId],references:[id])
+  attended Boolean @default(false)
+  @@id([eventId,userId])
+}
+model Challenge {
+  id String @id @default(cuid())
+  name String
+  description String
+  kind String
+  target Int
+  bonus Int
+  startsAt DateTime
+  endsAt DateTime
+  active Boolean @default(true)
+}
+model Notification {
+  id String @id @default(cuid())
+  userId String
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  message String
+  href String
+  read Boolean @default(false)
+  createdAt DateTime @default(now())
+  @@index([userId,read,createdAt])
+}
+model SavedReport {
+  userId String
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  reportId String
+  report TrashReport @relation(fields:[reportId],references:[id])
+  @@id([userId,reportId])
+}
+model Confirmation {
+  userId String
+  user User @relation(fields:[userId],references:[id])
+  reportId String
+  report TrashReport @relation(fields:[reportId],references:[id])
+  kind String
+  createdAt DateTime @default(now())
+  @@id([userId,reportId])
+}
+model AbuseReport {
+  id String @id @default(cuid())
+  reporterId String
+  targetType String
+  targetId String
+  reason String
+  details String
+  resolved Boolean @default(false)
+  createdAt DateTime @default(now())
+}
+model AuditLog {
+  id String @id @default(cuid())
+  actorId String
+  action String
+  target String
+  metadata Json
+  createdAt DateTime @default(now())
+}
+model Setting {
+  key String @id
+  value Json
+}
+model RateLimit {
+  key String @id
+  count Int
+  expiresAt DateTime
+}
+model LessonResult {
+  userId String
+  user User @relation(fields:[userId],references:[id])
+  lessonId String
+  completedAt DateTime @default(now())
+  @@id([userId,lessonId])
+}
