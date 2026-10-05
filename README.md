@@ -36,12 +36,12 @@ For a local database without a separate PostgreSQL installation, `npm run db:loc
 
 ## Render free deployment
 
-Create a free Render Postgres database and a free Node web service from this repository. The database uses the `DATABASE_URL` Render provides. The web service build command is `npm install && npm run db:migrate && npm run build`; start command is `npm start`.
+Create a free Render Postgres database and a free Node web service from this repository, or use `render.yaml`. The database uses the internal `DATABASE_URL` Render provides. Build command: `npm ci && npm run build`. Start command: `npm run db:migrate && npm run db:seed && npm start`. Health check: `/api/v1/health`.
 
-Set `NEXTAUTH_URL` to the final `https://*.onrender.com` URL and set a strong `NEXTAUTH_SECRET`. Configure `OWNER_EMAIL` and SMTP before opening registration. Leave `AI_ENDPOINT` blank for free human moderation; add a provider only when you have a permitted free endpoint.
+Set `NEXTAUTH_URL` to the final `https://*.onrender.com` URL and set a strong `NEXTAUTH_SECRET`. Configure `OWNER_EMAIL`, `BREVO_API_KEY`, and `MAIL_FROM` (a verified sender email) before opening registration. Brevo delivers verification, guardian approval, and reset emails over HTTPS. Standard SMTP ports are blocked on Render free services; SMTP remains supported for other hosts. Leave `AI_ENDPOINT` blank for free human moderation.
 
 Render documents that free PostgreSQL instances expire after 30 days. Before expiry, use the owner data export and a PostgreSQL dump, then restore to a durable free Postgres provider if the competition needs to remain live. The app’s image and points data remain relational and portable.
 
 ## Validation
 
-`npm run typecheck` and `npm run build` are the required release checks. `tests/domain.test.ts` covers points, UAE timezone streaks, distance checks, and role authorization. `tests/integration/journey.test.ts` covers registration, verification, report moderation, cleanup verification, achievement unlocks, atomic reward redemption, child restrictions, CSRF origin checks, and upload rejection. In this Windows environment the Node test worker can fail before loading tests with `uv_os_get_passwd`/ENOMEM; this is an environment issue rather than a test assertion failure.
+`npm run typecheck`, `npm run lint`, and `npm run build` are release checks. `npm test` covers points, UAE timezone streaks, distance checks, and role authorization. `npm run test:integration`, with the local database and development server running and demo data seeded, covers registration, verification, report moderation, cleanup verification, achievement unlocks, atomic reward redemption, child restrictions, CSRF origin checks, and upload rejection. The local socket server supports multiple connections for the app and test process.

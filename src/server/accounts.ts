@@ -7,17 +7,23 @@ import {EMIRATES} from '@/lib/domain';
 import {requireValue,rateLimit} from './security';
 const password=z.string().min(12,'Use at least 12 characters.').max(128);
 const registerSchema=z.object({email:z.email(),password,name:z.string().trim().min(2).max(60),username:z.string().regex(/^[a-zA-Z0-9_]{3,24}$/),kind:z.enum(['VOLUNTEER','CHILD','ORGANIZATION_ADMIN']),birthDate:z.iso.date(),emirate:z.enum(EMIRATES),guardianEmail:z.email().optional(),organizationName:z.string().min(2).max(100).optional(),interest:z.enum(['CLEAN','REPORT','BOTH','EXPLORE']).default('BOTH')});
+export function emailConfigured(){return Boolean(process.env.MAIL_FROM&&(process.env.BREVO_API_KEY||process.env.SMTP_HOST));}
 export async function deliverToken(userId:string,email:string,purpose:string){
   const raw=randomBytes(32).toString('hex');const digest=createHash('sha256').update(raw).digest('hex');
   await db.authToken.create({data:{userId,hash:digest,purpose,expiresAt:new Date(Date.now()+86400000)}});
   const url=`${process.env.NEXTAUTH_URL||'http://localhost:3000'}/verify?token=${raw}&purpose=${purpose}`;
+  if(process.env.BREVO_API_KEY){
+    requireValue(process.env.MAIL_FROM,'Email sender is not configured.',503);
+    const response=await fetch('https://api.brevo.com/v3/smtp/email',{method:'POST',headers:{'Content-Type':'application/json','api-key':process.env.BREVO_API_KEY},body:JSON.stringify({sender:{name:'GoGreen UAE',email:process.env.MAIL_FROM},to:[{email}],subject:purpose==='GUARDIAN'?'Approve a GoGreen UAE child account':'Your GoGreen UAE secure link',textContent:`${purpose==='GUARDIAN'?'Only approve if you are the parent or guardian. Child accounts cannot join public groups or claim cleanups.\n':''}Open this one-use link within 24 hours: ${url}\nIf you did not request this, ignore this message.`}),signal:AbortSignal.timeout(15000)});
+    requireValue(response.ok,'Email delivery is temporarily unavailable. Please request a new link later.',503);return;
+  }
   if(process.env.SMTP_HOST){const transport=nodemailer.createTransport({host:process.env.SMTP_HOST,port:Number(process.env.SMTP_PORT||587),secure:process.env.SMTP_PORT==='465',auth:process.env.SMTP_USER?{user:process.env.SMTP_USER,pass:process.env.SMTP_PASSWORD}:undefined});await transport.sendMail({from:process.env.MAIL_FROM,to:email,subject:purpose==='GUARDIAN'?'Approve a GoGreen UAE child account':'Your GoGreen UAE secure link',text:`${purpose==='GUARDIAN'?'A child account has requested your approval. Only approve if you are their parent or guardian. Child accounts cannot join public groups or claim cleanups.':''}\nOpen this one-use link within 24 hours: ${url}\nIf you did not request this, ignore this message.`});return;}
   requireValue(process.env.NODE_ENV!=='production','Email delivery is not configured. Contact the platform owner.',503);
   const {mkdir,appendFile}=await import('node:fs/promises');await mkdir('.local',{recursive:true});await appendFile('.local/mail.jsonl',JSON.stringify({email,purpose,url})+'\n');
 }
 export async function register(input:unknown){
  const data=registerSchema.parse(input);const email=data.email.toLowerCase();await rateLimit(`register:${email}`,3);
- requireValue(process.env.NODE_ENV!=='production'||process.env.SMTP_HOST,'Registration is not open yet. Email delivery needs to be configured.',503);
+ requireValue(process.env.NODE_ENV!=='production'||emailConfigured(),'Registration is not open yet. Email delivery needs to be configured.',503);
  const age=(Date.now()-Date.parse(data.birthDate))/31557600000;
  requireValue(age>=0&&age<=120,'Enter a valid date of birth.');requireValue(data.kind==='CHILD'?age<12:age>=12,'Please choose the account type that matches your age.');
  if(data.kind==='CHILD')requireValue(data.guardianEmail,'A guardian email is required.');
