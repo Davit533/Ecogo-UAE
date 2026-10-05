@@ -10,7 +10,6 @@ export async function actor() {
   requireValue(session?.user?.email,'Please sign in to continue.',401);
   const user = await db.user.findUnique({where:{email:session.user.email},include:{profile:true,child:true}});
   requireValue(user && !user.banned,'Your account is unavailable.',403);
-  requireValue(user.verifiedAt,'Verify your email before continuing.',403);
   requireValue(user.role !== 'CHILD' || user.child?.approvedAt,'Guardian approval is required.',403);
   return user;
 }

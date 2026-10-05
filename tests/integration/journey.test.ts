@@ -2,7 +2,7 @@ import 'dotenv/config';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import {readFile} from 'node:fs/promises';
+
 import {db} from '../../src/lib/db';
 const base='http://localhost:3000';
 class Client{
@@ -12,8 +12,8 @@ class Client{
 }
 test('complete account → report → independent moderation → cleanup → points → reward journey',async()=>{
  const unique=Date.now();const reporter=new Client();const cleaner=new Client();const owner=new Client();
- async function signup(client:Client,name:string){const email=`${name}-${unique}@example.test`;const response=await client.request('/api/v1/accounts/register',{email,password:'GoGreen-demo-2026!',name,username:`${name}${unique}`,kind:'VOLUNTEER',birthDate:'2000-01-01',emirate:'Dubai',interest:'BOTH'});assert.equal(response.status,200,JSON.stringify(response.data));const mail=(await readFile('.local/mail.jsonl','utf8')).trim().split('\n').map(s=>JSON.parse(s)).findLast(m=>m.email===email);const token=new URL(mail.url).searchParams.get('token');assert.equal((await client.request('/api/v1/accounts/verify',{token})).status,200);assert.equal((await client.request('/api/v1/accounts/verify',{token})).status,400);await client.login(email);return email;}
- await signup(reporter,'sara');await signup(cleaner,'omar');await owner.login('david@example.test');
+ async function signup(client:Client,name:string){const email=`${name}-${unique}@example.test`;const response=await client.request('/api/v1/accounts/register',{email,password:'GoGreen-demo-2026!',name,username:`${name}${unique}`,kind:'VOLUNTEER',birthDate:'2000-01-01',emirate:'Dubai',interest:'BOTH'});assert.equal(response.status,200,JSON.stringify(response.data));assert.match(response.data.recoveryCode,/^[a-f0-9]{64}$/);await client.login(email);return email;}
+ await signup(reporter,'sara');const guardianEmail=await signup(cleaner,'omar');await owner.login('david@example.test');
  assert.equal((await reporter.request('/api/v1/admin/users')).status,403);
  const reporterMe=(await reporter.request('/api/v1/me')).data;const cleanerMe=(await cleaner.request('/api/v1/me')).data;
  async function photo(client:Client,color:string){const bytes=await sharp({create:{width:500,height:350,channels:3,background:color}}).png().toBuffer();const form=new FormData();form.set('file',new File([new Uint8Array(bytes)],'test-evidence.png',{type:'image/png'}));const r=await client.request('/api/v1/uploads',form);assert.equal(r.status,200,JSON.stringify(r.data));return r.data.id;}
@@ -29,5 +29,17 @@ test('complete account → report → independent moderation → cleanup → poi
  const child=new Client();await child.login('explorer@example.test');assert.equal((await child.request('/api/v1/reports')).status,403);assert.equal((await child.request('/api/v1/groups')).status,403);assert.equal((await child.request('/api/v1/admin')).status,403);assert.equal((await child.request('/api/v1/lessons')).status,200);
  const csrf=await fetch(`${base}/api/v1/reports`,{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://attacker.invalid'},body:'{}'});assert.equal(csrf.status,403);
  const harmful=new FormData();harmful.set('file',new File(['<script>alert(1)</script>'],'bad.png',{type:'image/png'}));assert.notEqual((await reporter.request('/api/v1/uploads',harmful)).status,200);
+ const young=new Client();const youngEmail=`child-${unique}@example.test`;
+ const registeredChild=await young.request('/api/v1/accounts/register',{email:youngEmail,password:'GoGreen-demo-2026!',name:'Young Explorer',username:`child${unique}`,kind:'CHILD',birthDate:'2018-01-01',emirate:'Dubai',guardianEmail});assert.equal(registeredChild.status,200);
+ const childId=(await db.user.findUniqueOrThrow({where:{email:youngEmail}})).id;
+ assert.ok((await cleaner.request('/api/v1/guardian')).data.some((c:{userId:string})=>c.userId===childId));
+ assert.equal((await owner.request('/api/v1/guardian',{userId:childId,consent:true,birthDate:'1990-01-01'})).status,403);
+ assert.equal((await cleaner.request('/api/v1/guardian',{userId:childId,consent:true,birthDate:'2015-01-01'})).status,403);
+ assert.equal((await cleaner.request('/api/v1/guardian',{userId:childId,consent:true,birthDate:'1990-01-01'})).status,200);await young.login(youngEmail);
+ const recovery=(await cleaner.request('/api/v1/recovery-code',{})).data.code;
+ assert.equal((await young.request('/api/v1/accounts/recover',{email:youngEmail,code:recovery,password:'GoGreen-demo-2026!'})).status,400);
+ assert.equal((await cleaner.request('/api/v1/accounts/recover',{email:guardianEmail,code:recovery,password:'GoGreen-demo-2026!'})).status,200);
+ assert.equal((await cleaner.request('/api/v1/me')).status,401);
+ assert.equal((await cleaner.request('/api/v1/accounts/recover',{email:guardianEmail,code:recovery,password:'GoGreen-demo-2026!'})).status,400);await cleaner.login(guardianEmail);
  await db.$disconnect();
 });

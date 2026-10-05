@@ -3,7 +3,7 @@ import {z} from 'zod';
 import {db} from '@/lib/db';
 import {Prisma} from '@/generated/prisma/client';
 import {actor,admin,csrf,AppError,requireValue,rateLimit} from '@/server/security';
-import {register,consumeToken,requestToken} from '@/server/accounts';
+import {register,consumeToken,recover,recoveryCode,changePassword} from '@/server/accounts';
 import {createReport,claim,submitCleanup,moderateReport,moderateCleanup,reportDetail} from '@/server/reports';
 import {upload,ownPhoto} from '@/server/uploads';
 import {redeem,award,achievements} from '@/server/points';
@@ -17,9 +17,12 @@ async function feature(key:string){const setting=await db.setting.findUnique({wh
 async function handle(request:Request,context:Context){
  const {path}=await context.params;const [resource,id,action]=path;const url=new URL(request.url);const write=request.method!=='GET';if(write)csrf(request);
  if(resource==='health') {await db.$queryRaw`SELECT 1`;return {ok:true};}
- if(resource==='accounts'&&write){const body=await request.json();if(id==='register')return register(body);if(id==='verify')return consumeToken(body);if(id==='request-link')return requestToken(body);}
+ if(resource==='accounts'&&write){const body=await request.json();if(id==='register')return register(body);if(id==='recover')return recover(body);if(id==='verify')return consumeToken(body);if(id==='request-link')throw new AppError(400,'Use your saved recovery code to reset your password.');}
  if(resource==='impact'&&!write){const [cleanups,reports,volunteers,groups]=await Promise.all([db.cleanupAttempt.count({where:{status:'VERIFIED'}}),db.trashReport.count({where:{status:{in:['APPROVED','CLAIMED','AWAITING_VERIFICATION','CLEANED']}}}),db.user.count({where:{verifiedAt:{not:null},banned:false,role:{not:'CHILD'}}}),db.group.count({where:{suspended:false}})]);return {cleanups,reports,volunteers,groups};}
  const user=await actor();if(write)await rateLimit(`write:${user.id}`,100,60);
+ if(resource==='recovery-code'&&write)return {code:await recoveryCode(user.id)};
+ if(resource==='password'&&write)return changePassword(user.id,await request.json());
+ if(resource==='guardian'){requireValue(user.role!=='CHILD','An adult guardian account is required.',403);if(!write)return db.childProfile.findMany({where:{guardianEmail:user.email,approvedAt:null},select:{userId:true,user:{select:{name:true,username:true}}}});const data=z.object({userId:z.string(),consent:z.literal(true),birthDate:z.iso.date()}).parse(await request.json());requireValue((Date.now()-Date.parse(data.birthDate))/31557600000>=18,'Guardians must be at least 18.',403);const child=await db.childProfile.findUnique({where:{userId:data.userId}});requireValue(child&&child.guardianEmail===user.email,'This account is not awaiting your approval.',403);await db.childProfile.update({where:{userId:child.userId},data:{approvedAt:new Date()}});return {message:'Child account approved.'};}
  if(resource==='me'){
   if(!write)return {...await db.user.findUniqueOrThrow({where:{id:user.id},select:safeUser}),email:user.email,organizations:await db.organizationMember.findMany({where:{userId:user.id},include:{organization:true}}),levels:await db.level.findMany({orderBy:{minimumPoints:'asc'}}),settings:await db.setting.findMany()};
   const data=z.object({name:z.string().trim().min(2).max(60),bio:z.string().max(500),emirate:z.enum(EMIRATES),interest:z.enum(['CLEAN','REPORT','BOTH','EXPLORE']),theme:z.enum(['light','dark','system']),publicProfile:z.boolean(),leaderboard:z.boolean(),notifications:z.boolean()}).parse(await request.json());const {name,...profile}=data;if(user.role==='CHILD'){profile.publicProfile=false;profile.leaderboard=false;}await db.user.update({where:{id:user.id},data:{name,profile:{update:profile}}});return {message:'Your preferences are saved.'};

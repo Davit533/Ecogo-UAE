@@ -12,7 +12,6 @@ export const authOptions:NextAuthOptions={
     await rateLimit(`login:${email}`,15,900);
     const user=await db.user.findUnique({where:{email},include:{child:true}});
     if(!user || user.banned || !await compare(credentials.password,user.passwordHash))return null;
-    if(!user.verifiedAt) throw new Error('Please verify your email before signing in.');
     if(user.role==='CHILD'&&!user.child?.approvedAt)throw new Error('A guardian must approve this account first.');
     return {id:user.id,email:user.email,name:user.name,sessionVersion:user.sessionVersion};
   }})],
