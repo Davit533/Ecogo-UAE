@@ -3,10 +3,11 @@ import {db} from '@/lib/db';
 import {CATEGORIES,EMIRATES,cleanupPoints,distanceMeters,isAdmin} from '@/lib/domain';
 import {requireValue,rateLimit} from './security';
 import {ownPhoto} from './uploads';
-import {review} from './ai';
+import {review,safetyAdvice} from './ai';
+import {managedPlaces} from './places';
 import {award,achievements} from './points';
 import type {Role} from '@/generated/prisma/client';
-const schema=z.object({title:z.string().trim().min(5).max(100),description:z.string().trim().min(15).max(1500),category:z.enum(CATEGORIES),severity:z.coerce.number().int().min(1).max(5),latitude:z.coerce.number().min(22.6).max(26.2),longitude:z.coerce.number().min(51.4).max(56.6),address:z.string().min(3).max(200),emirate:z.enum(EMIRATES),photoId:z.string().min(1)});
+const schema=z.object({title:z.string().trim().min(5).max(100),description:z.string().trim().min(15).max(1500),category:z.enum(CATEGORIES),severity:z.coerce.number().int().min(1).max(5),latitude:z.coerce.number().min(22.6).max(26.2),longitude:z.coerce.number().min(51.4).max(56.6),address:z.string().min(3).max(200),emirate:z.enum(EMIRATES),photoId:z.string().min(1),placeId:z.string().optional()});
 export async function createReport(user:{id:string;role:Role},input:unknown){
  requireValue(user.role!=='CHILD','Ask your guardian to report this location with you. Child accounts cannot publish exact locations.',403);
  await rateLimit(`report:${user.id}`,12,86400);const data=schema.parse(input);const photo=await ownPhoto(user.id,data.photoId);
@@ -14,10 +15,12 @@ export async function createReport(user:{id:string;role:Role},input:unknown){
  const duplicate=nearby.find(r=>distanceMeters(r.latitude,r.longitude,data.latitude,data.longitude)<60&&r.category===data.category);
  requireValue(!duplicate,`This may already be reported. Open the nearby report ${duplicate?.id||''} and confirm it is still there.`,409);
  const hashes=await db.upload.findMany({where:{hash:photo.hash},select:{id:true}});const reused=await db.trashReport.findFirst({where:{photoId:{in:hashes.map(p=>p.id)}}});requireValue(!reused,'This photo has already been used in another report.',409);
- const places=await db.place.findMany({where:{status:'APPROVED',organization:{status:'VERIFIED'},latitude:{gte:data.latitude-.003,lte:data.latitude+.003},longitude:{gte:data.longitude-.003,lte:data.longitude+.003}}});
- const matches=places.filter(p=>distanceMeters(p.latitude,p.longitude,data.latitude,data.longitude)<=p.radiusMeters);
- const hazardous=['Hazardous waste','Construction debris','Electronic waste','Illegal dumping'].includes(data.category)||data.severity===5||/needle|chemical|medical|dead animal|unknown liquid|roadway/i.test(data.description);
- const report=await db.trashReport.create({data:{...data,reporterId:user.id,hazardous,placeId:matches.length===1?matches[0].id:undefined}});
+ const matches=await managedPlaces(data.latitude,data.longitude);
+ const selected=data.placeId?matches.find(p=>p.id===data.placeId):matches.length===1?matches[0]:undefined;
+ requireValue(!data.placeId||selected,'This location is outside the verified managed area.');
+ const hazardous=safetyAdvice(data.description,data.category,data.severity).hazardous;
+ const report=await db.trashReport.create({data:{...data,placeId:selected?.id,reporterId:user.id,hazardous}});
+ if(selected){const staff=await db.organizationMember.findMany({where:{organizationId:selected.organizationId},select:{userId:true}});await db.notification.createMany({data:staff.map(m=>({userId:m.userId,message:'A new environmental report was submitted at '+selected.name+'.',href:'/organizations/'+selected.organizationId}))});}
  const result=await review({...data,beforeId:data.photoId});await db.aIReview.create({data:{reportId:report.id,provider:result.provider,decision:result.decision,confidence:result.confidence,reason:result.reason}});
  if(result.hazardous)await db.trashReport.update({where:{id:report.id},data:{hazardous:true}});
  const auto=await db.setting.findUnique({where:{key:'aiAutoApproval'}});
@@ -39,7 +42,7 @@ export async function claim(user:{id:string;role:Role},id:string){
  return db.$transaction(async tx=>{
   await tx.$queryRaw`SELECT "id" FROM "User" WHERE "id"=${user.id} FOR UPDATE`;
   await tx.$queryRaw`SELECT "id" FROM "TrashReport" WHERE "id"=${id} FOR UPDATE`;
-  const r=await tx.trashReport.findUniqueOrThrow({where:{id}});requireValue(!r.hazardous,'Do not touch this waste. Contact the appropriate local authority.');
+  const r=await tx.trashReport.findUniqueOrThrow({where:{id},include:{place:{include:{organization:true}}}});if(r.place&&r.place.organization.status==='VERIFIED'&&r.place.status==='APPROVED')requireValue(isAdmin(user.role)||await tx.organizationMember.findUnique({where:{organizationId_userId:{organizationId:r.place.organizationId,userId:user.id}}}),'This is managed property. Ask the organization for permission; only its team can claim this cleanup.',403);requireValue(!r.hazardous,'Do not touch this waste. Contact the appropriate local authority.');
   if(r.status==='CLAIMED'){const expired=await tx.cleanupAttempt.findFirst({where:{reportId:id,status:'CLAIMED',expiresAt:{lt:new Date()}}});if(expired){await tx.cleanupAttempt.update({where:{id:expired.id},data:{status:'EXPIRED'}});await tx.trashReport.update({where:{id},data:{status:'APPROVED'}});r.status='APPROVED';}}
   requireValue(r.status==='APPROVED','This report is no longer available to claim.',409);
   requireValue(await tx.cleanupAttempt.count({where:{cleanerId:user.id,status:{in:['CLAIMED','PENDING_REVIEW']},expiresAt:{gt:new Date()}}})<3,'Finish or cancel an existing cleanup before claiming another.');
@@ -69,5 +72,36 @@ export async function moderateCleanup(actorId:string,id:string,approve:boolean,r
   await tx.auditLog.create({data:{actorId,action:approve?'CLEANUP_APPROVED':'CLEANUP_REJECTED',target:id,metadata:{reason}}});return {message:approve?'Cleanup verified and points awarded.':'Cleanup rejected; report is available again.'};
  });
 }
-export async function reportDetail(id:string,user:{id:string;role:string}){const r=await db.trashReport.findUnique({where:{id},include:{cleanups:{orderBy:{claimedAt:'desc'},take:5},_count:{select:{confirmations:true}},place:{select:{name:true,organizationId:true}}}});requireValue(r,'Report not found.',404);requireValue(r.status!=='PENDING_REVIEW'||r.reporterId===user.id||isAdmin(user.role),'This report is awaiting moderation.',403);return r;}
+export async function reportDetail(id:string,user:{id:string;role:string}){const r=await db.trashReport.findUnique({where:{id},include:{cleanups:{orderBy:{claimedAt:'desc'},take:5},_count:{select:{confirmations:true}},place:{select:{name:true,organizationId:true}},reviews:{orderBy:{createdAt:'desc'},take:2}}});requireValue(r,'Report not found.',404);const staff=r.place?await db.organizationMember.findUnique({where:{organizationId_userId:{organizationId:r.place.organizationId,userId:user.id}}}):null;requireValue(['APPROVED','CLAIMED','AWAITING_VERIFICATION','CLEANED'].includes(r.status)||r.reporterId===user.id||isAdmin(user.role)||(staff&&r.status!=='REMOVED'),'This report is private or awaiting moderation.',403);return r;}
 
+
+export async function editReport(user:{id:string;role:Role},id:string,input:unknown){
+ const existing=await db.trashReport.findUniqueOrThrow({where:{id}});requireValue(existing.reporterId===user.id,'Only the person who submitted this report can edit it.',403);
+ const data=schema.parse(input);await ownPhoto(user.id,data.photoId);
+ const matches=await managedPlaces(data.latitude,data.longitude);const selected=data.placeId?matches.find(p=>p.id===data.placeId):matches.length===1?matches[0]:undefined;
+ requireValue(!data.placeId||selected,'This location is outside the verified managed area.');
+ const photo=await db.upload.findUniqueOrThrow({where:{id:data.photoId}});const hashes=await db.upload.findMany({where:{hash:photo.hash},select:{id:true}});
+ requireValue(!await db.trashReport.findFirst({where:{id:{not:id},photoId:{in:hashes.map(p=>p.id)}}}),'This photo is already used in another report.',409);
+ const report=await db.$transaction(async tx=>{
+  await tx.$queryRaw`SELECT "id" FROM "TrashReport" WHERE "id"=${id} FOR UPDATE`;
+  const r=await tx.trashReport.findUniqueOrThrow({where:{id}});requireValue(r.reporterId===user.id,'Only the person who submitted this report can edit it.',403);
+  requireValue(['PENDING_REVIEW','APPROVED','REJECTED','DUPLICATE'].includes(r.status),'A report with a cleanup in progress or a completed cleanup cannot be edited.',409);
+  requireValue(r.latitude===data.latitude&&r.longitude===data.longitude,'Report location cannot be moved. Delete it and submit a new report if the pin is wrong.');
+  await tx.aIReview.deleteMany({where:{reportId:id,cleanupId:null}});
+  const updated=await tx.trashReport.update({where:{id},data:{...data,placeId:selected?.id??null,hazardous:safetyAdvice(data.description,data.category,data.severity).hazardous,status:'PENDING_REVIEW'}});
+  await tx.auditLog.create({data:{actorId:user.id,action:'REPORT_EDITED',target:id,metadata:{previousStatus:r.status}}});return updated;
+ });
+ const result=await review({...report,beforeId:report.photoId});await db.aIReview.create({data:{reportId:id,provider:result.provider,decision:result.decision,confidence:result.confidence,reason:result.reason}});
+ return {id,message:'Changes saved. Your report is back in the review queue; approval does not award duplicate points.'};
+}
+export async function deleteReport(user:{id:string;role:Role},id:string){
+ return db.$transaction(async tx=>{
+  await tx.$queryRaw`SELECT "id" FROM "TrashReport" WHERE "id"=${id} FOR UPDATE`;
+  const r=await tx.trashReport.findUniqueOrThrow({where:{id}});requireValue(r.reporterId===user.id,'Only the person who submitted this report can delete it.',403);
+  requireValue(!['CLAIMED','AWAITING_VERIFICATION'].includes(r.status),'Cancel your cleanup claim or wait for verification before deleting this report.',409);
+  requireValue(r.status!=='REMOVED','This report was already deleted.',409);
+  await tx.trashReport.update({where:{id},data:{status:'REMOVED'}});await tx.savedReport.deleteMany({where:{reportId:id}});
+  await tx.auditLog.create({data:{actorId:user.id,action:'REPORT_DELETED',target:id,metadata:{previousStatus:r.status}}});
+  return {message:'Report removed from the map and your report list. Verified contribution and audit records are retained.'};
+ });
+}

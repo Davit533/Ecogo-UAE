@@ -17,8 +17,8 @@ test('complete account → report → independent moderation → cleanup → poi
  assert.equal((await reporter.request('/api/v1/admin/users')).status,403);
  const reporterMe=(await reporter.request('/api/v1/me')).data;const cleanerMe=(await cleaner.request('/api/v1/me')).data;
  async function photo(client:Client,color:string){const bytes=await sharp({create:{width:500,height:350,channels:3,background:color}}).png().toBuffer();const form=new FormData();form.set('file',new File([new Uint8Array(bytes)],'test-evidence.png',{type:'image/png'}));const r=await client.request('/api/v1/uploads',form);assert.equal(r.status,200,JSON.stringify(r.data));return r.data.id;}
- const before=await photo(reporter,`#${(unique%0xffffff).toString(16).padStart(6,'0')}`);const longitude=55.27+(unique%10000)/1000000;
- const report=await reporter.request('/api/v1/reports',{title:'Integration test report',description:'Test evidence for the verified environmental workflow.',category:'Plastic',severity:3,latitude:25.20+(unique%10000)/1000000,longitude,address:'Local test park',emirate:'Dubai',photoId:before});assert.equal(report.status,200,JSON.stringify(report.data));const id=report.data.id;
+ const before=await photo(reporter,`#${(unique%0xffffff).toString(16).padStart(6,'0')}`);const longitude=53+Math.random()*.2;
+ const report=await reporter.request('/api/v1/reports',{title:'Integration test report',description:'Test evidence for the verified environmental workflow.',category:'Plastic',severity:3,latitude:23.5+Math.random()*.2,longitude,address:'Local test park',emirate:'Dubai',photoId:before});assert.equal(report.status,200,JSON.stringify(report.data));const id=report.data.id;
  const pending=await db.trashReport.findUniqueOrThrow({where:{id}});assert.equal(pending.status,'PENDING_REVIEW');assert.equal((await db.profile.findUniqueOrThrow({where:{userId:reporterMe.id}})).balance,0);
  assert.equal((await cleaner.request(`/api/v1/reports/${id}/claim`,{})).status,409);
  const approved=await owner.request('/api/v1/admin/reports',{id,decision:'APPROVE',reason:'Test evidence independently reviewed.'});assert.equal(approved.status,200,JSON.stringify(approved.data));assert.equal((await owner.request('/api/v1/admin/reports',{id,decision:'APPROVE',reason:'Duplicate approval attempt.'})).status,409);
@@ -41,5 +41,41 @@ test('complete account → report → independent moderation → cleanup → poi
  assert.equal((await cleaner.request('/api/v1/accounts/recover',{email:guardianEmail,code:recovery,password:'GoGreen-demo-2026!'})).status,200);
  assert.equal((await cleaner.request('/api/v1/me')).status,401);
  assert.equal((await cleaner.request('/api/v1/accounts/recover',{email:guardianEmail,code:recovery,password:'GoGreen-demo-2026!'})).status,400);await cleaner.login(guardianEmail);
+
+ // Report ownership, edits, private property routing, and safe local AI.
+ const hotel=await db.organization.create({data:{name:'Integration hotel '+unique,type:'HOTEL',description:'Test managed property',emirate:'Dubai',status:'VERIFIED',members:{create:{userId:cleanerMe.id,role:'ADMIN'}}}});
+ const hotelLat=24.1+Math.random()*.2,hotelLng=54.4;
+ const hotelPlace=await db.place.create({data:{organizationId:hotel.id,name:'Hotel garden',address:'Test hotel grounds',latitude:hotelLat,longitude:hotelLng,radiusMeters:80,proofId:before,status:'PENDING'}});
+ const hotelPhoto=await photo(reporter,'#'+((unique+30000)%0xffffff).toString(16).padStart(6,'0'));
+ const payload={title:'Bottles in hotel garden',description:'Several bottles on the garden path near the hotel entrance.',category:'Bottles',severity:2,latitude:hotelLat,longitude:hotelLng,address:'Test hotel garden',emirate:'Dubai',photoId:hotelPhoto};
+ const hr=await reporter.request('/api/v1/reports',payload);assert.equal(hr.status,200,JSON.stringify(hr.data));const hotelReport=hr.data.id;
+ assert.equal((await cleaner.request('/api/v1/reports/'+hotelReport)).status,403);
+ assert.equal((await owner.request('/api/v1/admin/places',{id:hotelPlace.id,status:'APPROVED'})).status,200);
+ assert.equal((await db.trashReport.findUniqueOrThrow({where:{id:hotelReport}})).placeId,hotelPlace.id);
+ const hotelPage=(await cleaner.request('/api/v1/organizations/'+hotel.id)).data;assert.ok(hotelPage.places[0].reports.some((r:{id:string})=>r.id===hotelReport));
+ assert.equal((await cleaner.request('/api/v1/reports/'+hotelReport)).status,200);
+ assert.equal((await reporter.request('/api/v1/organizations/'+hotel.id)).data.places[0].reports.length,0);
+ assert.equal((await cleaner.request('/api/v1/reports/'+hotelReport+'/edit',payload)).status,403);
+ assert.equal((await cleaner.request('/api/v1/reports/'+hotelReport+'/delete',{})).status,403);
+ const ai=await reporter.request('/api/v1/ai/assist',{photoId:hotelPhoto});assert.equal(ai.status,200,JSON.stringify(ai.data));assert.ok(ai.data.observations.length>0);
+ assert.equal((await cleaner.request('/api/v1/ai/assist',{photoId:hotelPhoto})).status,400);
+ await owner.request('/api/v1/admin/reports',{id:hotelReport,decision:'APPROVE',reason:'Independent hotel evidence check'});
+ const balanceBefore=(await db.profile.findUniqueOrThrow({where:{userId:reporterMe.id}})).balance;
+ assert.equal((await reporter.request('/api/v1/reports/'+hotelReport+'/edit',{...payload,title:'Bottles beside hotel entrance',placeId:hotelPlace.id})).status,200);
+ assert.equal((await db.trashReport.findUniqueOrThrow({where:{id:hotelReport}})).status,'PENDING_REVIEW');
+ const review=await db.aIReview.findFirstOrThrow({where:{reportId:hotelReport}});assert.equal(review.decision,'REVIEW');assert.equal(review.provider,'Xenova/mobilevit-xx-small');
+ await owner.request('/api/v1/admin/reports',{id:hotelReport,decision:'APPROVE',reason:'Updated description independently reviewed'});
+ assert.equal((await db.profile.findUniqueOrThrow({where:{userId:reporterMe.id}})).balance,balanceBefore);
+ assert.equal((await reporter.request('/api/v1/reports/'+hotelReport+'/claim',{})).status,403);
+ const hotelClaim=await cleaner.request('/api/v1/reports/'+hotelReport+'/claim',{});assert.equal(hotelClaim.status,200,JSON.stringify(hotelClaim.data));
+ assert.equal((await reporter.request('/api/v1/reports/'+hotelReport+'/edit',payload)).status,409);
+ assert.equal((await reporter.request('/api/v1/reports/'+hotelReport+'/delete',{})).status,409);
+ assert.equal((await cleaner.request('/api/v1/cleanups/'+hotelClaim.data.id+'/cancel',{})).status,200);
+ const search=(await reporter.request('/api/v1/reports?q=hotel%20entrance')).data;assert.ok(search.some((r:{id:string})=>r.id===hotelReport));
+ assert.ok((await reporter.request('/api/v1/reports?mine=true')).data.some((r:{id:string})=>r.id===hotelReport));
+ assert.equal((await reporter.request('/api/v1/reports/'+hotelReport+'/delete',{})).status,200);
+ assert.equal((await cleaner.request('/api/v1/reports/'+hotelReport+'/claim',{})).status,409);
+ assert.ok(!(await reporter.request('/api/v1/reports?mine=true')).data.some((r:{id:string})=>r.id===hotelReport));
+ assert.equal((await cleaner.request('/api/v1/reports/'+hotelReport)).status,403);
  await db.$disconnect();
 });
